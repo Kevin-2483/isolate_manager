@@ -398,6 +398,158 @@ class IsolateManager<R, P> {
   /// Get value as stream.
   Stream<R> get stream => _streamController.stream;
 
+  /// Get raw message stream from the underlying isolates without any filtering.
+  /// This provides direct access to all messages received from isolates,
+  /// bypassing the IsolateManager's internal filtering and lifecycle management.
+  ///
+  /// Use this when you need complete control over message handling and want to
+  /// receive all messages including intermediate results, progress updates, etc.
+  ///
+  /// Note: Messages received through this stream are not processed by the
+  /// queue callback mechanism and will not affect the lifecycle of compute() calls.
+  Stream<R> get rawMessageStream {
+    if (_isolates.isEmpty) {
+      // Return empty stream if no isolates are created yet
+      return const Stream.empty();
+    }
+
+    // Merge all isolate onMessage streams
+    final isolateStreams = _isolates.keys.map((isolate) => isolate.onMessage);
+
+    if (isolateStreams.length == 1) {
+      return isolateStreams.first;
+    }
+
+    // Merge multiple streams if there are multiple isolates
+    late StreamController<R> controller;
+    controller = StreamController<R>.broadcast();
+
+    final subscriptions = <StreamSubscription<R>>[];
+
+    for (final stream in isolateStreams) {
+      final subscription = stream.listen(
+        controller.add,
+        onError: controller.addError,
+      );
+      subscriptions.add(subscription);
+    }
+
+    return controller.stream;
+  }
+
+  /// Get direct access to the underlying isolate contactors.
+  /// This allows for complete manual control over isolate communication.
+  ///
+  /// Use with caution as this bypasses all IsolateManager safety mechanisms.
+  List<IsolateContactor<R, P>> get isolateContactors {
+    return _isolates.keys.toList();
+  }
+
+    /// Send message directly to a specific isolate without going through the queue system.
+  /// This provides direct access to the underlying isolate communication channel.
+  /// 
+  /// [isolateIndex] specifies which isolate to send to (0-based index).
+  /// If not provided, sends to the first available isolate.
+  /// 
+  /// Use this when you need complete control over message sending and want to
+  /// bypass the IsolateManager's queue and lifecycle management.
+  /// 
+  /// Warning: Using this method bypasses all safety mechanisms including:
+  /// - Queue management
+  /// - Isolate availability checking  
+  /// - Error handling
+  /// - Message ordering guarantees
+  Future<R> sendRawMessage(P message, {int? isolateIndex}) async {
+    if (_isolates.isEmpty) {
+      throw StateError('No isolates available. Call start() first.');
+    }
+    
+    final isolateList = _isolates.keys.toList();
+    final targetIndex = isolateIndex ?? 0;
+    
+    if (targetIndex >= isolateList.length) {
+      throw RangeError('Isolate index $targetIndex is out of range. '
+          'Available isolates: ${isolateList.length}');
+    }
+    
+    final targetIsolate = isolateList[targetIndex];
+    return await targetIsolate.sendMessage(message);
+  }
+
+  /// Send message to all isolates simultaneously.
+  /// Returns a list of results from all isolates.
+  /// 
+  /// Use this when you want to broadcast a message to all available isolates.
+  /// 
+  /// Warning: This bypasses all queue and safety mechanisms.
+  Future<List<R>> broadcastRawMessage(P message) async {
+    if (_isolates.isEmpty) {
+      throw StateError('No isolates available. Call start() first.');
+    }
+    
+    final futures = _isolates.keys.map((isolate) => isolate.sendMessage(message));
+    return await Future.wait(futures);
+  }
+
+  /// Send message without waiting for response.
+  /// This is a fire-and-forget operation.
+  /// 
+  /// Use this when you only want to send commands and don't need responses,
+  /// or when you're handling responses through rawMessageStream.
+  void sendRawMessageFireAndForget(P message, {int? isolateIndex}) {
+    if (_isolates.isEmpty) {
+      throw StateError('No isolates available. Call start() first.');
+    }
+    
+    final isolateList = _isolates.keys.toList();
+    final targetIndex = isolateIndex ?? 0;
+    
+    if (targetIndex >= isolateList.length) {
+      throw RangeError('Isolate index $targetIndex is out of range. '
+          'Available isolates: ${isolateList.length}');
+    }
+    
+    final targetIsolate = isolateList[targetIndex];
+    
+    // Fire and forget - don't wait for response
+    targetIsolate.sendMessage(message).ignore();
+  }
+
+    /// Get the number of available isolates.
+  int get isolateCount => _isolates.length;
+
+  /// Check if a specific isolate is busy.
+  bool isIsolateBusy(int isolateIndex) {
+    if (isolateIndex >= _isolates.length) {
+      throw RangeError('Isolate index $isolateIndex is out of range.');
+    }
+    
+    final isolate = _isolates.keys.elementAt(isolateIndex);
+    return _isolates[isolate] ?? false;
+  }
+
+  /// Get the first available (not busy) isolate index.
+  /// Returns null if all isolates are busy.
+  int? get firstAvailableIsolateIndex {
+    for (int i = 0; i < _isolates.length; i++) {
+      if (!isIsolateBusy(i)) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  /// Send message to the first available isolate.
+  /// Throws StateError if all isolates are busy.
+  Future<R> sendToAvailableIsolate(P message) async {
+    final availableIndex = firstAvailableIsolateIndex;
+    if (availableIndex == null) {
+      throw StateError('All isolates are busy. Try again later or increase concurrent count.');
+    }
+    
+    return await sendRawMessage(message, isolateIndex: availableIndex);
+  }
+
   /// Convert the result received from the isolate before getting real result.
   /// This function useful when the result received from the isolate is different
   /// from the return type.

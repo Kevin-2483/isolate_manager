@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 
 import 'package:isolate_manager/isolate_manager.dart';
@@ -53,6 +54,39 @@ class IsolateManagerControllerImpl<R, P>
   @override
   void sendResultError(IsolateException exception) =>
       _delegate.sendResultError(exception);
+
+  /// Get direct access to the raw Worker global scope for advanced control.
+  /// Only available in Web Worker environment.
+  @override
+  dynamic get rawWorkerScope {
+    if (_delegate is _IsolateManagerWorkerController<R, P>) {
+      return _delegate.rawWorkerScope;
+    }
+    throw UnsupportedError(
+        'rawWorkerScope is only available in Web Worker environment');
+  }
+
+  /// Set a custom message handler that receives all raw messages.
+  @override
+  void setRawMessageHandler(bool Function(dynamic event) handler) {
+    if (_delegate is _IsolateManagerWorkerController<R, P>) {
+      _delegate.setRawMessageHandler(handler);
+    } else {
+      throw UnsupportedError(
+          'setRawMessageHandler is only available in Web Worker environment');
+    }
+  }
+
+  /// Send raw message directly through Worker's postMessage.
+  @override
+  void sendRawMessage(dynamic data) {
+    if (_delegate is _IsolateManagerWorkerController<R, P>) {
+      _delegate.sendRawMessage(data);
+    } else {
+      throw UnsupportedError(
+          'sendRawMessage is only available in Web Worker environment');
+    }
+  }
 }
 
 // TODO(lamnhan066): Find a way to test these methods because it only used by the compiled JS Worker.
@@ -60,17 +94,100 @@ class IsolateManagerControllerImpl<R, P>
 class _IsolateManagerWorkerController<R, P>
     implements IsolateContactorController<R, P> {
   _IsolateManagerWorkerController(this.self, {this.onDispose}) {
-    self.onmessage = (MessageEvent event) {
-      dynamic result = event.data.dartify();
-      if (isImTypeSubtype<P>()) {
-        result = ImType.wrap(result as Object);
+    // 保存原始的 onmessage 处理器
+    _originalOnMessage = (MessageEvent event) {
+      // --- 这是我们添加的核心修改 ---
+      try {
+        // 先调用自定义的原始处理器（如果有）
+        if (_rawMessageHandler != null) {
+          final shouldContinue = _rawMessageHandler!(event);
+          if (!shouldContinue) {
+            return; // 停止进一步处理
+          }
+        }
+
+        // 正常的消息处理
+        final rawData = event.data.dartify();
+        dynamic processedData = rawData;
+
+        // 检查接收到的原始数据是否为字符串
+        if (rawData is String) {
+          try {
+            // 如果是字符串，尝试用 JSON 解码
+            processedData = json.decode(rawData);
+          } catch (e) {
+            // 解码失败，说明它就是个普通字符串，不是JSON
+            // 保持 processedData 为原始字符串，不做处理
+            print(
+                '[IsolateManager-Worker-Patch] Received a non-JSON string: $e');
+          }
+        }
+
+        // 确保 ImType 逻辑仍然有效
+        if (isImTypeSubtype<P>()) {
+          processedData = ImType.wrap(processedData as Object);
+        }
+
+        // 将最终处理过的数据添加到流中
+        _streamController.sink.add(processedData as P);
+      } catch (e, s) {
+        // 如果整个过程出错，将错误发送到流中
+        _streamController.sink.addError(e, s);
       }
-      _streamController.sink.add(result as P);
+      // --- 核心修改结束 ---
     }.toJS;
+
+    self.onmessage = _originalOnMessage;
   }
+
   final DedicatedWorkerGlobalScope self;
   final void Function()? onDispose;
   final _streamController = StreamController<P>.broadcast();
+  // 新增字段
+  late final JSFunction _originalOnMessage;
+  bool Function(dynamic)? _rawMessageHandler;
+
+  /// 获取原始 Worker 作用域
+  dynamic get rawWorkerScope => self;
+
+  /// 设置原始消息处理器
+  void setRawMessageHandler(bool Function(dynamic event) handler) {
+    _rawMessageHandler = handler;
+  }
+
+  /// 发送原始消息
+  void sendRawMessage(dynamic data) {
+    try {
+      // 安全地转换 data 为 JSAny
+      JSAny? jsData;
+      if (data == null) {
+        jsData = null; // 直接使用 null
+      } else if (data is String) {
+        jsData = data.toJS;
+      } else if (data is num) {
+        jsData = data.toJS;
+      } else if (data is bool) {
+        jsData = data.toJS;
+      } else {
+        // 对于其他类型，尝试转换为字符串
+        jsData = data.toString().toJS;
+      }
+      self.postMessage(jsData);
+    } catch (e) {
+      // 如果所有转换都失败，发送错误信息
+      self.postMessage('Error converting data to JS: $e'.toJS);
+    }
+  }
+
+  /// 新增：直接设置 onmessage 处理器（完全绕过 IsolateManager）
+  void setRawOnMessageHandler(JSFunction handler) {
+    self.onmessage = handler;
+  }
+
+  /// 新增：恢复默认的 onmessage 处理器
+  void restoreDefaultOnMessageHandler() {
+    self.onmessage = _originalOnMessage;
+  }
 
   @override
   Stream<P> get onIsolateMessage => _streamController.stream.cast();

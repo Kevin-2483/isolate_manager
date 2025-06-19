@@ -48,4 +48,23 @@ class IsolateManagerControllerImpl<R, P>
   @override
   void sendResultError(IsolateException exception) =>
       _delegate.sendResultError(exception);
+
+  /// 在非 Web 环境中不可用
+  @override
+  dynamic get rawWorkerScope => throw UnsupportedError(
+      'rawWorkerScope is only available in Web Worker environment');
+
+  /// 在非 Web 环境中不可用
+  @override
+  void setRawMessageHandler(bool Function(dynamic event) handler) {
+    throw UnsupportedError(
+        'setRawMessageHandler is only available in Web Worker environment');
+  }
+
+  /// 在非 Web 环境中不可用
+  @override
+  void sendRawMessage(dynamic data) {
+    throw UnsupportedError(
+        'sendRawMessage is only available in Web Worker environment');
+  }
 }
